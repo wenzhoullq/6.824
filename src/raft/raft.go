@@ -179,6 +179,16 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 更新follower的日志
 }
 
+type AppendEntryArgs struct {
+}
+
+type AppendEntryReply struct {
+}
+
+func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
+	rf.beatChan <- struct{}{}
+}
+
 // example code to send a RequestVote RPC to a server.
 // server is the index of the target server in rf.peers[].
 // expects RPC arguments in args.
@@ -206,6 +216,10 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // capitalized all field names in structs passed over RPC, and
 // that the caller passes the address of the reply struct with &, not
 // the struct itself.
+func (rf *Raft) sendAppendEntry(server int, args *AppendEntryArgs, reply *AppendEntryReply) {
+	rf.peers[server].Call("Raft.RequestBeta", args, reply)
+}
+
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
 	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
 	return ok
@@ -250,6 +264,30 @@ func (rf *Raft) Kill() {
 func (rf *Raft) killed() bool {
 	z := atomic.LoadInt32(&rf.dead)
 	return z == 1
+}
+
+func (rf *Raft) beta() {
+	for !rf.killed() {
+		switch rf.status {
+		case Leader:
+			//Follower的过期时间为50 + (rand.Int63() % 300),leader定时传心跳包的时间25
+			//The tester requires that the leader send heartbeat RPCs no more than ten times per second.
+			ms := 100
+			time.Sleep(time.Duration(ms) * time.Millisecond)
+			//对所有的follower发送心跳包
+			for i := 0; i < len(rf.peers); i++ {
+				if i == rf.me {
+					continue
+				}
+				req := AppendEntryArgs{}
+				reply := AppendEntryReply{}
+				rf.sendAppendEntry(i, &req, &reply)
+			}
+
+		default:
+
+		}
+	}
 }
 
 func (rf *Raft) ticker() {
@@ -354,6 +392,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// start ticker goroutine to start elections
 	go rf.ticker()
-
+	go rf.beta()
 	return rf
 }
