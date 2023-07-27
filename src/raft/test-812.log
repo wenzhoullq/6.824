@@ -1,0 +1,13 @@
+=== RUN   TestInitialElection2A
+Test (2A): initial election ...
+    config.go:466: servers disagree on term
+--- FAIL: TestInitialElection2A (0.89s)
+=== RUN   TestReElection2A
+Test (2A): election after network failure ...
+  ... Passed --   4.9  3  942  173576    0
+--- PASS: TestReElection2A (4.87s)
+=== RUN   TestManyElections2A
+Test (2A): multiple elections ...
+  ... Passed --   5.4  7 7474 1389762    0
+--- PASS: TestManyElections2A (5.45s)
+FAIL

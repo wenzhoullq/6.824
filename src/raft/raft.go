@@ -139,105 +139,78 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 // field names must start with capital letters!
 type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
-	CandidateTerm int //候选者的任期
-	CandidateId   int //候选者的Id
+	Term         int //候选者的任期
+	CandidateId  int //候选者的Id
+	LastLogIndex int //上一个日志的索引下标
+	LastLogTerm  int //上一个日志的任期
 }
 
 // example RequestVote RPC reply structure.
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
-	CandidateTerm int  //候选者任期
-	VoteGranted   bool //是否获得了这个选票
+	Term        int  //follower的任期,如果candidate的任期晚于follower,更新自己的状态
+	VoteGranted bool //是否获得了这个选票
 }
 
 // example RequestVote RPC handler.
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// 如果候选者的任期小于follower的任期,则拒绝这个请求
-	if args.CandidateTerm < rf.currentTerm {
+	if args.Term < rf.currentTerm {
 		reply.VoteGranted = false
+		//返回follower的任期
+		reply.Term = rf.currentTerm
 		return
 	}
 	// 比较日志,如果候选者的日志落后于follower,则拒绝本次请求
 
 	// 如果这个任期内已投过票,则拒绝
-	if args.CandidateTerm == rf.currentTerm {
+	if args.Term == rf.currentTerm {
 		if rf.voteFor != -1 {
+			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 			return
 		}
 	}
-	rf.mu.Lock()
-	// 更新follower的任期
-	rf.currentTerm = args.CandidateTerm
-	//累计得票数归为0
-	rf.voteNum = 0
-	// follower的票投给请求者
-	rf.voteFor = args.CandidateId
+	rf.changeStatus(args.Term, args.CandidateId, true, Follower)
+	//返回follower的任期
+	reply.Term = rf.currentTerm
 	reply.VoteGranted = true
-	//状态变为follower
-	rf.status = Follower
-	//返回参数的任期
-	reply.CandidateTerm = args.CandidateTerm
 	// 更新follower的日志
-	rf.mu.Unlock()
 	rf.beatCancel()
 	//fmt.Println(rf.me, args.CandidateId, rf.currentTerm)
 }
 
 type AppendEntryArgs struct {
-	IsBeta      bool //是否是心跳
-	Leader      int  //领导编号
-	CurrentTerm int  // 当前任期
+	LeaderId     int        //领导编号
+	Term         int        // 当前任期
+	PrevLogIndex int        //上一个需要提交的logIndex
+	PrevLogTerm  int        //上一个需要提交的任期
+	Entries      []ApplyMsg //log日志,如果长度为0则表明是心跳
+	LeaderCommit int        //Leader的下表
 }
 
 type AppendEntryReply struct {
+	Term    int  // Follower的任期,如果Follower>Leader,则更新Leader的任期
+	Success bool //是否接受了日志
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
-	switch args.IsBeta {
-	//如果是心跳包
-	case true:
-		//如果任期相同,接受本次心跳
-		if rf.currentTerm == args.CurrentTerm {
-
-		} else if rf.currentTerm > args.CurrentTerm {
-			//拒绝本次心跳
-			return
-		} else {
-			//任期小于,则修改信息
-			rf.mu.Lock()
-			rf.status = Follower
-			rf.voteNum = 0
-			rf.voteFor = -1
-			rf.currentTerm = args.CurrentTerm
-			rf.leader = args.Leader
-			rf.mu.Unlock()
-		}
-		rf.beatCancel()
+	if rf.currentTerm > args.Term {
+		//本次请求失败
+		reply.Success = false
+		reply.Term = rf.currentTerm
 		return
-	case false:
-		//如果任期大于它,则直接拒绝
-		if rf.currentTerm > args.CurrentTerm {
-			return
-		}
-
-		rf.mu.Lock()
-		defer rf.mu.Unlock()
-		//确定领导
-		rf.leader = args.Leader
-		//改变状态
-		rf.status = Follower
-		//改变任期
-		rf.currentTerm = args.CurrentTerm
-		//投票记为发送给新leader,因为存在将票已经投给其他的候选者的情况
-		rf.voteFor = args.Leader
-		//累计得票数归零
-		rf.voteNum = 0
-		rf.beatCancel()
 	}
+	//更新状态
+	rf.changeStatus(args.Term, args.LeaderId, false, Follower)
+	//无论是心跳还是日志复制都要重置过期时间
+	rf.beatCancel()
+	if len(args.Entries) > 0 {
+		//非心跳包,进行更新
 
+	}
 }
 
 // example code to send a RequestVote RPC to a server.
@@ -332,9 +305,8 @@ func (rf *Raft) beta() {
 				continue
 			}
 			req := AppendEntryArgs{
-				IsBeta:      true,
-				Leader:      rf.me,
-				CurrentTerm: rf.currentTerm,
+				LeaderId: rf.me,
+				Term:     rf.currentTerm,
 			}
 			reply := AppendEntryReply{}
 			go func(i int) {
@@ -345,8 +317,43 @@ func (rf *Raft) beta() {
 	}
 }
 
+func (rf *Raft) changeStatus(term int, leaderId int, voteFor bool, status int) {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	switch status {
+	case Leader:
+		rf.status = Leader
+	case Follower:
+		//确定领导
+		if leaderId != -1 {
+			//投票记为发送给新leader,因为存在将票已经投给其他的候选者的情况
+			rf.leader = leaderId
+		}
+		if voteFor {
+			//如果是投票则投票
+			rf.voteFor = leaderId
+		}
+		//改变状态
+		rf.status = Follower
+		//改变任期
+		rf.currentTerm = term
+		//累计得票数归零
+		rf.voteNum = 0
+	case Candidates:
+		//改变状态
+		rf.status = Candidates
+		//当前任期自增
+		rf.currentTerm = term
+		//给自己投一票
+		rf.voteFor = rf.me
+		//累计票数增加
+		rf.voteNum = 1
+	}
+
+}
+
 func (rf *Raft) ticker() {
-out:
+o1:
 	for rf.killed() == false {
 
 		// Your code here (2A)
@@ -358,7 +365,7 @@ out:
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		//如果是leader,则不进行检测
 		if _, leader := rf.GetState(); leader {
-			continue out
+			continue o1
 		}
 		select {
 		case <-rf.beatCtx.Done():
@@ -368,64 +375,68 @@ out:
 			rf.beatCtx = beatCtx
 			rf.beatCancel = beatCancel
 			rf.mu.Unlock()
-			continue out
+			continue o1
 		default:
 			//没有收到心跳包成为candidate开始选举为leader
-			rf.mu.Lock()
-			rf.status = Candidates
-			//当前任期自增
-			rf.currentTerm++
-			//给自己投一票
-			rf.voteFor = rf.me
-			//累计票数增加
-			rf.voteNum = 1
-			rf.mu.Unlock()
-			for i := 0; i < len(rf.peers); i++ {
-				// 对其他节点发起投票请求
-				if i == rf.me {
-					continue
-				}
-				go func(server int) {
-					//开启协程,防止单个节点失联导致程序阻塞
-					reqArgs := &RequestVoteArgs{
-						CandidateTerm: rf.currentTerm,
-						CandidateId:   rf.me,
+			//选举失败则立即开始选举
+			for rf.killed() == false {
+				rf.changeStatus(rf.currentTerm+1, rf.me, true, Candidates)
+				for i := 0; i < len(rf.peers); i++ {
+					// 对其他节点发起投票请求
+					if i == rf.me {
+						continue
 					}
-					replyArgs := &RequestVoteReply{}
-					if ok := rf.sendRequestVote(server, reqArgs, replyArgs); ok {
-						//接受投票且任期相同则票数+1
-						if replyArgs.VoteGranted && replyArgs.CandidateTerm == rf.currentTerm && rf.status == Candidates {
-							rf.mu.Lock()
-							rf.voteNum++
-							if rf.voteNum <= len(rf.peers)/2 {
+					go func(server int) {
+						//开启协程,防止单个节点失联导致程序阻塞
+						reqArgs := &RequestVoteArgs{
+							Term:        rf.currentTerm,
+							CandidateId: rf.me,
+						}
+						replyArgs := &RequestVoteReply{}
+						if ok := rf.sendRequestVote(server, reqArgs, replyArgs); ok {
+							//接受投票且任期相同则票数+1
+							if replyArgs.VoteGranted && replyArgs.Term == rf.currentTerm && rf.status == Candidates {
+								rf.mu.Lock()
+								rf.voteNum++
 								rf.mu.Unlock()
+								if rf.voteNum <= len(rf.peers)/2 {
+									return
+								}
+								//如果获得大部分选票,则成为leader
+								rf.changeStatus(-1, -1, false, Leader)
+								//对其他节点发起自己的日志复制
+								for i := 0; i < len(rf.peers); i++ {
+									if i == rf.me {
+										continue
+									}
+									go func(i int) {
+										//开启协程防止阻塞
+										args := &AppendEntryArgs{
+											LeaderId: rf.me,
+											Term:     rf.currentTerm,
+										}
+										reply := &AppendEntryReply{}
+										//如果还是Leader则发起心跳
+										if _, ok := rf.GetState(); ok {
+											rf.sendAppendEntry(i, args, reply)
+										}
+									}(i)
+								}
+							} else if replyArgs.Term > rf.currentTerm {
+								//如果follower任期大于candidates,则candidates变为follower并且退出选举
+								rf.changeStatus(replyArgs.Term, -1, false, Follower)
 								return
 							}
-							//如果获得大部分选票,则成为leader
-							rf.status = Leader
-							rf.mu.Unlock()
-							//对其他节点发起自己的日志复制
-							for i := 0; i < len(rf.peers); i++ {
-								if i == rf.me {
-									continue
-								}
-								go func(i int) {
-									//开启协程防止阻塞
-									args := &AppendEntryArgs{
-										IsBeta:      false,
-										Leader:      rf.me,
-										CurrentTerm: rf.currentTerm,
-									}
-									reply := &AppendEntryReply{}
-									rf.sendAppendEntry(i, args, reply)
-								}(i)
-							}
+
 						}
-					}
-				}(i)
+					}(i)
+				}
+				time.Sleep(time.Duration(10) * time.Millisecond)
+				if _, leader := rf.GetState(); leader {
+					continue o1
+				}
 			}
 		}
-
 	}
 }
 
