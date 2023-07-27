@@ -69,10 +69,18 @@ type Raft struct {
 	beatCancel  context.CancelFunc  // 用于接受心跳的cancel,
 	beatCtx     context.Context     // 用于接受心跳的ctx
 	status      int                 // 状态枚举值,leader,candidates,follower,
+	log         []Entry             //日志
+	commitIndex int                 //待提交的日志
+	lastApplied int                 //日志的高位下标,用于状态机
+	nextIndex   []int
+	matchIndex  []int
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 
+}
+
+type Entry struct {
 }
 
 // return currentTerm and whether this server
@@ -183,12 +191,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 type AppendEntryArgs struct {
-	LeaderId     int        //领导编号
-	Term         int        // 当前任期
-	PrevLogIndex int        //上一个需要提交的logIndex
-	PrevLogTerm  int        //上一个需要提交的任期
-	Entries      []ApplyMsg //log日志,如果长度为0则表明是心跳
-	LeaderCommit int        //Leader的下表
+	LeaderId     int     //领导编号
+	Term         int     // 当前任期
+	PrevLogIndex int     //上一个需要提交的logIndex
+	PrevLogTerm  int     //上一个需要提交的任期
+	Entries      []Entry //log日志,如果长度为0则表明是心跳
+	LeaderCommit int     //Leader的下表
 }
 
 type AppendEntryReply struct {
@@ -267,7 +275,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (2B).
-
+	term, isLeader = rf.GetState()
 	return index, term, isLeader
 }
 
@@ -431,7 +439,8 @@ o1:
 						}
 					}(i)
 				}
-				time.Sleep(time.Duration(10) * time.Millisecond)
+				//休眠一段时间,等待所有的任务派发完毕,太短则任务还没派发完毕就重新选举;太长则会超时
+				time.Sleep(time.Duration(25) * time.Millisecond)
 				if _, leader := rf.GetState(); leader {
 					continue o1
 				}
