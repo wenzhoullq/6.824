@@ -64,11 +64,11 @@ type Raft struct {
 	dead        int32               // set by Kill()
 	currentTerm int                 // 当前任期
 	voteFor     int                 // 当前任期内投递的候选人的Id
-	leader      int                 //它的领导
-	voteNum     int                 //累计获得票数
-	beatCancel  context.CancelFunc  //用于接受心跳的cancel,
-	beatCtx     context.Context     //用于接受心跳的ctx
-	status      int                 //状态枚举值,leader,candidates,follower,
+	leader      int                 // 它的领导
+	voteNum     int                 // 累计获得票数
+	beatCancel  context.CancelFunc  // 用于接受心跳的cancel,
+	beatCtx     context.Context     // 用于接受心跳的ctx
+	status      int                 // 状态枚举值,leader,candidates,follower,
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -147,8 +147,8 @@ type RequestVoteArgs struct {
 // field names must start with capital letters!
 type RequestVoteReply struct {
 	// Your data here (2A).
-	FollowerTerm int  //追随者的任期
-	VoteGranted  bool //是否获得了这个选票
+	CandidateTerm int  //候选者任期
+	VoteGranted   bool //是否获得了这个选票
 }
 
 // example RequestVote RPC handler.
@@ -178,6 +178,8 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.VoteGranted = true
 	//状态变为follower
 	rf.status = Follower
+	//返回参数的任期
+	reply.CandidateTerm = args.CandidateTerm
 	// 更新follower的日志
 	rf.mu.Unlock()
 	rf.beatCancel()
@@ -378,78 +380,50 @@ out:
 			//累计票数增加
 			rf.voteNum = 1
 			rf.mu.Unlock()
-			wg := sync.WaitGroup{}
 			for i := 0; i < len(rf.peers); i++ {
 				// 对其他节点发起投票请求
 				if i == rf.me {
 					continue
 				}
-				wg.Add(1)
 				go func(server int) {
 					//开启协程,防止单个节点失联导致程序阻塞
-					defer wg.Done()
 					reqArgs := &RequestVoteArgs{
 						CandidateTerm: rf.currentTerm,
 						CandidateId:   rf.me,
 					}
 					replyArgs := &RequestVoteReply{}
-					go func() {
-						if ok := rf.sendRequestVote(server, reqArgs, replyArgs); ok {
-							//票数+1
-							if replyArgs.VoteGranted {
-								rf.mu.Lock()
-								rf.voteNum++
+					if ok := rf.sendRequestVote(server, reqArgs, replyArgs); ok {
+						//接受投票且任期相同则票数+1
+						if replyArgs.VoteGranted && replyArgs.CandidateTerm == rf.currentTerm && rf.status == Candidates {
+							rf.mu.Lock()
+							rf.voteNum++
+							if rf.voteNum <= len(rf.peers)/2 {
 								rf.mu.Unlock()
-								//fmt.Println("gaga", rf.currentTerm, len(rf.peers), rf.voteNum)
+								return
+							}
+							//如果获得大部分选票,则成为leader
+							rf.status = Leader
+							rf.mu.Unlock()
+							//对其他节点发起自己的日志复制
+							for i := 0; i < len(rf.peers); i++ {
+								if i == rf.me {
+									continue
+								}
+								go func(i int) {
+									//开启协程防止阻塞
+									args := &AppendEntryArgs{
+										IsBeta:      false,
+										Leader:      rf.me,
+										CurrentTerm: rf.currentTerm,
+									}
+									reply := &AppendEntryReply{}
+									rf.sendAppendEntry(i, args, reply)
+								}(i)
 							}
 						}
-					}()
+					}
 				}(i)
 			}
-			wg.Wait()
-			go func() {
-				//开启检测
-				for rf.killed() == false {
-					switch rf.status {
-					case Candidates:
-						if rf.voteNum <= len(rf.peers)/2 {
-							continue
-						}
-						//如果获得大部分选票,则成为leader
-						rf.mu.Lock()
-						rf.status = Leader
-						rf.mu.Unlock()
-						//对其他节点发起自己的日志复制
-						wg1 := sync.WaitGroup{}
-						for i := 0; i < len(rf.peers); i++ {
-							if i == rf.me {
-								continue
-							}
-							wg1.Add(1)
-							go func(i int) {
-								//开启协程防止阻塞
-								defer wg1.Done()
-								args := &AppendEntryArgs{
-									IsBeta:      false,
-									Leader:      rf.me,
-									CurrentTerm: rf.currentTerm,
-								}
-								reply := &AppendEntryReply{}
-								go func() {
-									rf.sendAppendEntry(i, args, reply)
-								}()
-
-							}(i)
-						}
-						wg1.Wait()
-						return
-					default:
-						return
-					}
-				}
-
-			}()
-
 		}
 
 	}
