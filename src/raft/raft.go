@@ -18,17 +18,12 @@ package raft
 //
 
 import (
+	"6.5840/labrpc"
 	"context"
-	"fmt"
-
-	//	"bytes"
 	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	//	"6.5840/labgob"
-	"6.5840/labrpc"
 )
 
 // as each Raft peer becomes aware that successive log entries are
@@ -161,14 +156,11 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// 如果候选者的任期小于follower的任期,则拒绝这个请求
 	if args.CandidateTerm < rf.currentTerm {
-		reply.FollowerTerm = rf.currentTerm
 		reply.VoteGranted = false
 		return
 	}
 	// 比较日志,如果候选者的日志落后于follower,则拒绝本次请求
 
-	rf.mu.Lock()
-	defer rf.mu.Unlock()
 	// 如果这个任期内已投过票,则拒绝
 	if args.CandidateTerm == rf.currentTerm {
 		if rf.voteFor != -1 {
@@ -176,14 +168,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 			return
 		}
 	}
+	rf.mu.Lock()
 	// 更新follower的任期
 	rf.currentTerm = args.CandidateTerm
-
+	//累计得票数归为0
+	rf.voteNum = 0
 	// follower的票投给请求者
 	rf.voteFor = args.CandidateId
 	reply.VoteGranted = true
+	//状态变为follower
+	rf.status = Follower
 	// 更新follower的日志
-	//fmt.Println("leaderId", rf.voteFor, "follower Id", rf.me, "term", args.CandidateTerm)
+	rf.mu.Unlock()
+	rf.beatCancel()
+	//fmt.Println(rf.me, args.CandidateId, rf.currentTerm)
 }
 
 type AppendEntryArgs struct {
@@ -196,11 +194,33 @@ type AppendEntryReply struct {
 }
 
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
-	rf.beatCancel()
 	switch args.IsBeta {
+	//如果是心跳包
 	case true:
-		//如果是心跳包,则直接返回
+		//如果任期相同,接受本次心跳
+		if rf.currentTerm == args.CurrentTerm {
+
+		} else if rf.currentTerm > args.CurrentTerm {
+			//拒绝本次心跳
+			return
+		} else {
+			//任期小于,则修改信息
+			rf.mu.Lock()
+			rf.status = Follower
+			rf.voteNum = 0
+			rf.voteFor = -1
+			rf.currentTerm = args.CurrentTerm
+			rf.leader = args.Leader
+			rf.mu.Unlock()
+		}
+		rf.beatCancel()
+		return
 	case false:
+		//如果任期大于它,则直接拒绝
+		if rf.currentTerm > args.CurrentTerm {
+			return
+		}
+
 		rf.mu.Lock()
 		defer rf.mu.Unlock()
 		//确定领导
@@ -209,10 +229,11 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		rf.status = Follower
 		//改变任期
 		rf.currentTerm = args.CurrentTerm
-		//投票记为-1
-		rf.voteFor = -1
-		//累计票数归零
+		//投票记为发送给新leader,因为存在将票已经投给其他的候选者的情况
+		rf.voteFor = args.Leader
+		//累计得票数归零
 		rf.voteNum = 0
+		rf.beatCancel()
 	}
 
 }
@@ -296,27 +317,28 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) beta() {
 	for !rf.killed() {
-		switch rf.status {
-		case Leader:
-			//Follower的过期时间为50 + (rand.Int63() % 300),leader定时传心跳包的时间25
-			//The tester requires that the leader send heartbeat RPCs no more than ten times per second.但是和默认冲突
-			ms := 25
-			time.Sleep(time.Duration(ms) * time.Millisecond)
-			//对所有的follower发送心跳包
-			for i := 0; i < len(rf.peers); i++ {
-				if i == rf.me {
-					continue
-				}
-				req := AppendEntryArgs{
-					IsBeta: true,
-				}
-				reply := AppendEntryReply{}
-
-				rf.sendAppendEntry(i, &req, &reply)
+		//Follower的过期时间为50 + (rand.Int63() % 300),leader定时传心跳包的时间25
+		//The tester requires that the leader send heartbeat RPCs no more than ten times per second.但是和默认冲突
+		ms := 25
+		time.Sleep(time.Duration(ms) * time.Millisecond)
+		if _, leader := rf.GetState(); !leader {
+			continue
+		}
+		//对所有的节点发送心跳包
+		for i := 0; i < len(rf.peers); i++ {
+			if i == rf.me {
+				continue
 			}
-
-		default:
-
+			req := AppendEntryArgs{
+				IsBeta:      true,
+				Leader:      rf.me,
+				CurrentTerm: rf.currentTerm,
+			}
+			reply := AppendEntryReply{}
+			go func(i int) {
+				//开启协程防止阻塞
+				rf.sendAppendEntry(i, &req, &reply)
+			}(i)
 		}
 	}
 }
@@ -332,13 +354,18 @@ out:
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
 		time.Sleep(time.Duration(ms) * time.Millisecond)
-		//如果是leader,则不进行选举
-		if _, ok := rf.GetState(); ok {
-			continue
+		//如果是leader,则不进行检测
+		if _, leader := rf.GetState(); leader {
+			continue out
 		}
 		select {
 		case <-rf.beatCtx.Done():
-			//收到心跳包,返回
+			//收到心跳包,重置ctx
+			beatCtx, beatCancel := context.WithCancel(context.Background())
+			rf.mu.Lock()
+			rf.beatCtx = beatCtx
+			rf.beatCancel = beatCancel
+			rf.mu.Unlock()
 			continue out
 		default:
 			//没有收到心跳包成为candidate开始选举为leader
@@ -350,60 +377,81 @@ out:
 			rf.voteFor = rf.me
 			//累计票数增加
 			rf.voteNum = 1
+			rf.mu.Unlock()
 			wg := sync.WaitGroup{}
 			for i := 0; i < len(rf.peers); i++ {
 				// 对其他节点发起投票请求
-				if i != rf.me {
-					wg.Add(1)
-					go func(server int) {
-						defer wg.Done()
-						go func() {
-							reqArgs := &RequestVoteArgs{
-								CandidateTerm: rf.currentTerm,
-								CandidateId:   rf.me,
-							}
-							replyArgs := &RequestVoteReply{}
-							if ok := rf.sendRequestVote(server, reqArgs, replyArgs); ok {
-								//rf.mu.Lock()
-								//defer rf.mu.Unlock()
-								//票数+1
-								if replyArgs.VoteGranted {
-									rf.voteNum++
-									//fmt.Println("gaga", rf.currentTerm, len(rf.peers), rf.voteNum)
-								}
-							}
-						}()
-					}(i)
+				if i == rf.me {
+					continue
 				}
+				wg.Add(1)
+				go func(server int) {
+					//开启协程,防止单个节点失联导致程序阻塞
+					defer wg.Done()
+					reqArgs := &RequestVoteArgs{
+						CandidateTerm: rf.currentTerm,
+						CandidateId:   rf.me,
+					}
+					replyArgs := &RequestVoteReply{}
+					go func() {
+						if ok := rf.sendRequestVote(server, reqArgs, replyArgs); ok {
+							//票数+1
+							if replyArgs.VoteGranted {
+								rf.mu.Lock()
+								rf.voteNum++
+								rf.mu.Unlock()
+								//fmt.Println("gaga", rf.currentTerm, len(rf.peers), rf.voteNum)
+							}
+						}
+					}()
+				}(i)
 			}
 			wg.Wait()
-			//fmt.Println("haha", rf.voteNum)
-			//如果获得大部分选票,则成为leader
-			if rf.voteNum >= len(rf.peers)/2 {
-				fmt.Println(rf.voteNum, len(rf.peers)/2, rf.currentTerm)
-				rf.status = Leader
-				//对其他节点发起自己的日志复制
-				wg1 := sync.WaitGroup{}
-				for i := 0; i < len(rf.peers); i++ {
-					if i == rf.me {
-						continue
-					}
-					wg1.Add(1)
-					go func(i int) {
-						defer wg1.Done()
-						args := &AppendEntryArgs{
-							IsBeta:      false,
-							Leader:      rf.me,
-							CurrentTerm: rf.currentTerm,
+			go func() {
+				//开启检测
+				for rf.killed() == false {
+					switch rf.status {
+					case Candidates:
+						if rf.voteNum <= len(rf.peers)/2 {
+							continue
 						}
-						reply := &AppendEntryReply{}
-						rf.sendAppendEntry(i, args, reply)
-					}(i)
+						//如果获得大部分选票,则成为leader
+						rf.mu.Lock()
+						rf.status = Leader
+						rf.mu.Unlock()
+						//对其他节点发起自己的日志复制
+						wg1 := sync.WaitGroup{}
+						for i := 0; i < len(rf.peers); i++ {
+							if i == rf.me {
+								continue
+							}
+							wg1.Add(1)
+							go func(i int) {
+								//开启协程防止阻塞
+								defer wg1.Done()
+								args := &AppendEntryArgs{
+									IsBeta:      false,
+									Leader:      rf.me,
+									CurrentTerm: rf.currentTerm,
+								}
+								reply := &AppendEntryReply{}
+								go func() {
+									rf.sendAppendEntry(i, args, reply)
+								}()
+
+							}(i)
+						}
+						wg1.Wait()
+						return
+					default:
+						return
+					}
 				}
-				wg1.Wait()
-			}
+
+			}()
+
 		}
-		rf.mu.Unlock()
+
 	}
 }
 
@@ -419,6 +467,7 @@ out:
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
 	rf := &Raft{}
+	//raft初始化
 	rf.peers = peers
 	rf.persister = persister
 	rf.me = me
