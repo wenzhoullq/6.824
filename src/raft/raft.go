@@ -69,11 +69,11 @@ type Raft struct {
 	beatCancel  context.CancelFunc  // 用于接受心跳的cancel,
 	beatCtx     context.Context     // 用于接受心跳的ctx
 	status      int                 // 状态枚举值,leader,candidates,follower,
-	log         []Entry             //日志
+	log         []Entry             //本地的日志
 	commitIndex int                 //待提交的日志
 	lastApplied int                 //日志的高位下标,用于状态机
-	nextIndex   []int
-	matchIndex  []int
+	nextIndex   []int               //下一个需要送到指定的日志的下标
+	matchIndex  []int               //follower和leader匹配的最高索引
 	// Your data here (2A, 2B, 2C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -81,6 +81,9 @@ type Raft struct {
 }
 
 type Entry struct {
+	Command interface{} //具体的指令
+	Term    int         //日志所在的任期
+	Index   int         //这个任期下的下标
 }
 
 // return currentTerm and whether this server
@@ -149,8 +152,8 @@ type RequestVoteArgs struct {
 	// Your data here (2A, 2B).
 	Term         int //候选者的任期
 	CandidateId  int //候选者的Id
-	LastLogIndex int //上一个日志的索引下标
-	LastLogTerm  int //上一个日志的任期
+	LastLogIndex int //candidate最后一个日志的索引下标
+	LastLogTerm  int //candidate最后一个日志的任期
 }
 
 // example RequestVote RPC reply structure.
@@ -196,7 +199,7 @@ type AppendEntryArgs struct {
 	PrevLogIndex int     //上一个需要提交的logIndex
 	PrevLogTerm  int     //上一个需要提交的任期
 	Entries      []Entry //log日志,如果长度为0则表明是心跳
-	LeaderCommit int     //Leader的下表
+	LeaderCommit int     //Leader的下标,leader节点的commitIndex
 }
 
 type AppendEntryReply struct {
@@ -217,7 +220,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	rf.beatCancel()
 	if len(args.Entries) > 0 {
 		//非心跳包,进行更新
-
+		//if len(rf.log)
 	}
 }
 
