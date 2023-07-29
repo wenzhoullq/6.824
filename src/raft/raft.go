@@ -214,6 +214,7 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Term = rf.currentTerm
 		return
 	}
+	//比较日志更新程度
 	//更新状态
 	rf.changeStatus(args.Term, args.LeaderId, false, Follower)
 	//无论是心跳还是日志复制都要重置过期时间
@@ -272,6 +273,7 @@ func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *Reques
 // if it's ever committed. the second return value is the current
 // term. the third return value is true if this server believes it is
 // the leader.
+// leader用于接收日志并且持久化,但是不提交
 func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	index := -1
 	term := -1
@@ -279,6 +281,17 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 
 	// Your code here (2B).
 	term, isLeader = rf.GetState()
+	//如果不是leader,则f
+	if !isLeader {
+		return index, term, isLeader
+	}
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	rf.log = append(rf.log, Entry{
+		Command: command,
+		Term:    term,
+		//Index:rf.
+	})
 	return index, term, isLeader
 }
 
@@ -334,6 +347,11 @@ func (rf *Raft) changeStatus(term int, leaderId int, voteFor bool, status int) {
 	switch status {
 	case Leader:
 		rf.status = Leader
+		//维护nextIndex为自己的最后一条日志的Index+1
+		index := rf.log[len(rf.log)-1].Index + 1
+		for i := 0; i < len(rf.nextIndex); i++ {
+			rf.nextIndex[i] = index
+		}
 	case Follower:
 		//确定领导
 		if leaderId != -1 {
@@ -427,7 +445,7 @@ o1:
 											Term:     rf.currentTerm,
 										}
 										reply := &AppendEntryReply{}
-										//如果还是Leader则发起心跳
+										//如果是Leader则发起复制
 										if _, ok := rf.GetState(); ok {
 											rf.sendAppendEntry(i, args, reply)
 										}
@@ -473,6 +491,10 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	ctx, cancel := context.WithCancel(context.Background())
 	rf.beatCancel = cancel
 	rf.beatCtx = ctx
+	rf.matchIndex = make([]int, 0)
+	rf.nextIndex = make([]int, 0)
+	rf.log = make([]Entry, 0)
+	rf.lastApplied = 0
 	// Your initialization code here (2A, 2B, 2C).
 
 	// initialize from state persisted before a crash
