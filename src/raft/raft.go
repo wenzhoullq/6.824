@@ -175,7 +175,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		return
 	}
 	// 比较日志,如果候选者的日志落后于follower,则拒绝本次请求
-
 	// 如果这个任期内已投过票,则拒绝
 	if args.Term == rf.currentTerm {
 		if rf.voteFor != -1 {
@@ -214,14 +213,23 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Term = rf.currentTerm
 		return
 	}
-	//比较日志更新程度
+	//比较日志
 	//更新状态
 	rf.changeStatus(args.Term, args.LeaderId, false, Follower)
 	//无论是心跳还是日志复制都要重置过期时间
 	rf.beatCancel()
 	if len(args.Entries) > 0 {
 		//非心跳包,进行更新
-		//if len(rf.log)
+		//如果follower在prevLogIndex的term不相同,则返回false
+		if rf.log[args.PrevLogIndex].Term != args.PrevLogTerm {
+			reply.Success = false
+			return
+		}
+		//更新日志
+		for _, v := range args.Entries {
+			rf.log = append(rf.log, v)
+		}
+		reply.Success = true
 	}
 }
 
@@ -381,6 +389,26 @@ func (rf *Raft) changeStatus(term int, leaderId int, voteFor bool, status int) {
 
 }
 
+func (rf *Raft) logReplication() {
+	for i := 0; i < len(rf.peers); i++ {
+		if i == rf.me {
+			continue
+		}
+		go func(i int) {
+			//开启协程防止阻塞
+			args := &AppendEntryArgs{
+				LeaderId: rf.me,
+				Term:     rf.currentTerm,
+			}
+			reply := &AppendEntryReply{}
+			//如果是Leader则发起复制
+			if _, ok := rf.GetState(); ok {
+				rf.sendAppendEntry(i, args, reply)
+			}
+		}(i)
+	}
+}
+
 func (rf *Raft) ticker() {
 o1:
 	for rf.killed() == false {
@@ -434,23 +462,7 @@ o1:
 								//如果获得大部分选票,则成为leader
 								rf.changeStatus(-1, -1, false, Leader)
 								//对其他节点发起自己的日志复制
-								for i := 0; i < len(rf.peers); i++ {
-									if i == rf.me {
-										continue
-									}
-									go func(i int) {
-										//开启协程防止阻塞
-										args := &AppendEntryArgs{
-											LeaderId: rf.me,
-											Term:     rf.currentTerm,
-										}
-										reply := &AppendEntryReply{}
-										//如果是Leader则发起复制
-										if _, ok := rf.GetState(); ok {
-											rf.sendAppendEntry(i, args, reply)
-										}
-									}(i)
-								}
+								rf.logReplication()
 							} else if replyArgs.Term > rf.currentTerm {
 								//如果follower任期大于candidates,则candidates变为follower并且退出选举
 								rf.changeStatus(replyArgs.Term, -1, false, Follower)
