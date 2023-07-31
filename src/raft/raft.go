@@ -177,6 +177,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// 检查任期
+	fmt.Println(args, rf.currentTerm, rf.commitIndex, "haha", rf.me, rf.status)
 	rf.mu.Lock()
 	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
@@ -189,28 +190,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// 检查日志的完整性
 	// 先比较日志的任期号
 	rf.mu.Lock()
-	logLen := len(rf.log)
-	if logLen > 0 {
-		if args.LastLogTerm < rf.log[logLen-1].Term {
-			reply.VoteGranted = false
-			reply.Term = currentTerm
-			rf.mu.Unlock()
-			return
-		} else if args.LastLogTerm == rf.log[logLen-1].Term {
-			//如果任期号相同,则比较索引号
-			if args.LastLogIndex < rf.log[logLen-1].Index {
-				reply.VoteGranted = false
-				reply.Term = currentTerm
-				rf.mu.Unlock()
-				return
-			}
-		}
+	rf.currentTerm = args.Term
+	//currentTerm = args.Term
+	if rf.commitIndex > 0 && (rf.log[rf.commitIndex-1].Term > args.LastLogTerm || rf.commitIndex > args.LastLogIndex) {
+		//上一条日志和发送过来的index所对应的任期不能匹配
+		reply.VoteGranted = false
+		reply.Term = rf.currentTerm
+		rf.mu.Unlock()
+		return
 	}
 	rf.mu.Unlock()
 	// 如果这个任期内已投过票,则拒绝
 	if args.Term == currentTerm {
 		if rf.voteFor != -1 {
-			reply.Term = currentTerm
+			reply.Term = rf.currentTerm
 			reply.VoteGranted = false
 			return
 		}
@@ -221,10 +214,54 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	reply.Term = rf.currentTerm
 	rf.mu.Unlock()
 	reply.VoteGranted = true
-	// 更新follower的日志
-	rf.beatCancel()
+	fmt.Println(args, rf.currentTerm, rf.commitIndex, "gaga", rf.me)
 	//fmt.Println(rf.me, args.CandidateId, rf.currentTerm)
 }
+
+//func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
+//	fmt.Println(args, rf.currentTerm, rf.commitIndex, "haha")
+//	rf.beatCancel()
+//	//if rf.commitIndex > 0 {
+//	//	fmt.Println(rf.log[rf.commitIndex-1].Term, "haha")
+//	//}
+//	// Your code here (2A, 2B).
+//	// 检查任期
+//	rf.mu.Lock()
+//
+//	currentTerm := rf.currentTerm
+//	rf.mu.Unlock()
+//	if args.Term < currentTerm {
+//		reply.VoteGranted = false
+//		//返回follower的任期
+//		reply.Term = currentTerm
+//		return
+//	}
+//	rf.mu.Lock()
+//	reply.Term = rf.currentTerm
+//	rf.mu.Unlock()
+//	// 任期相同检查日志的完整性
+//	rf.mu.Lock()
+//	if rf.commitIndex > 0 && (rf.log[rf.commitIndex-1].Term > args.Term || (rf.log[rf.commitIndex-1].Term == args.Term && rf.commitIndex > args.LastLogIndex)) {
+//		//上一条日志和发送过来的index所对应的任期不能匹配
+//		reply.VoteGranted = false
+//		reply.Term = currentTerm
+//		rf.mu.Unlock()
+//		return
+//	}
+//	rf.mu.Unlock()
+//	// 如果这个任期内已投过票,则拒绝
+//	if args.Term == currentTerm {
+//		if rf.voteFor != -1 {
+//			reply.Term = currentTerm
+//			reply.VoteGranted = false
+//			return
+//		}
+//	}
+//	rf.changeStatus(args.Term, args.CandidateId, true, Follower)
+//	//返回follower的任期
+//	reply.VoteGranted = true
+//	fmt.Println(args, rf.currentTerm, rf.me, "gaga")
+//}
 
 type AppendEntryArgs struct {
 	LeaderId     int     //领导编号
@@ -244,6 +281,8 @@ type AppendEntryReply struct {
 func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	//matchIndex的返回值是log的长度
 	//fmt.Println(args)
+	//无论是心跳还是日志复制都要重置过期时间
+	rf.beatCancel()
 	rf.mu.Lock()
 	//先检查任期
 	if rf.currentTerm > args.Term {
@@ -260,22 +299,18 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 	//更新commit
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//无论是心跳还是日志复制都要重置过期时间
-	rf.beatCancel()
+
 	if len(args.Entries) > 0 {
 		//非心跳包,进行比较和更新
-		//比较日志
-		//先比较任期
-		//fmt.Println(rf.log, args, "sdadasd")
-		if args.PrevLogIndex == 0 {
-		} else if rf.log[args.PrevLogIndex-1].Term != args.PrevLogTerm {
-			//日志的任期不相等
-			reply.Success = false
-			reply.Term = rf.currentTerm
-			reply.MatchIndex = 0
-			//fmt.Println(reply, args)
-			//fmt.Println()
-			return
+		logLen := len(rf.log)
+		if logLen > 0 {
+			if args.PrevLogIndex > 0 && args.PrevLogTerm > rf.log[args.PrevLogIndex-1].Term {
+				//上一条日志和发送过来的index所对应的任期不能匹配
+				reply.Success = false
+				reply.Term = rf.currentTerm
+				rf.mu.Unlock()
+				return
+			}
 		}
 		//更新日志
 		for _, v := range args.Entries {
@@ -284,20 +319,23 @@ func (rf *Raft) AppendEntry(args *AppendEntryArgs, reply *AppendEntryReply) {
 		reply.Success = true
 		reply.Term = rf.currentTerm
 		reply.MatchIndex = min(args.LeaderCommit, len(rf.log))
+
 		//fmt.Println(rf.me, rf.log, rf.commitIndex, rf.currentTerm)
 	}
 	if args.LeaderCommit > rf.commitIndex {
 		//fmt.Println(args)
-		for i := rf.commitIndex; i < args.LeaderCommit; i++ {
-			//fmt.Println(len(rf.log), i, args.LeaderCommit)
-			rf.applyChan <- ApplyMsg{
-				CommandValid: true,
-				CommandIndex: rf.log[i].Index,
-				Command:      rf.log[i].Command,
-			}
-		}
 		rf.commitIndex = min(args.LeaderCommit, len(rf.log))
+		//fmt.Println(rf.me, rf.status, rf.log, rf.currentTerm)
 	}
+	for i := args.PrevLogIndex; i < rf.commitIndex; i++ {
+		//fmt.Println(len(rf.log), i, args.LeaderCommit)
+		rf.applyChan <- ApplyMsg{
+			CommandValid: true,
+			CommandIndex: rf.log[i].Index,
+			Command:      rf.log[i].Command,
+		}
+	}
+
 	//fmt.Println(rf.me, rf.log, rf.commitIndex, rf.currentTerm)
 }
 func min(i, j int) int {
@@ -377,13 +415,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Index:   logLen + 1,
 	}
 	rf.log = append(rf.log, entry)
-	fmt.Println(entry)
-	//for i := 0; i < len(rf.peers); i++ {
-	//	if i == rf.me {
-	//		continue
-	//	}
-	//	go rf.logReplication(i)
-	//}
+	rf.persist()
 	return logLen + 1, term, isLeader
 }
 
@@ -399,6 +431,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
+
 }
 
 func (rf *Raft) killed() bool {
@@ -413,7 +446,7 @@ func (rf *Raft) changeStatus(term int, leaderId int, voteFor bool, status int) {
 	case Leader:
 		rf.status = Leader
 		//维护nextIndex为自己的最后一条日志的Index+1
-		fmt.Println("gaga")
+		//fmt.Println("gaga")
 		for i := 0; i < len(rf.peers); i++ {
 			rf.nextIndex[i] = len(rf.log) + 1
 			rf.matchIndex[i] = 0
@@ -466,19 +499,21 @@ func (rf *Raft) newAppendEntryArgs(i int, status int) *AppendEntryArgs {
 	switch status {
 	case Beat:
 		args.LeaderCommit = matchIndex
-		if matchIndex-1 >= 0 {
+		if matchIndex > 0 {
 			args.PrevLogTerm = rf.log[matchIndex-1].Term
 			args.PrevLogIndex = rf.log[matchIndex-1].Index
 		}
 	case Replicate:
-		args.LeaderCommit = nextIndex
+		args.LeaderCommit = len(rf.log)
+		//要复制的日志的前一个,因此是-2
 		if nextIndex-2 >= 0 {
 			//fmt.Println(nextIndex-1, rf.log, rf.me)
 			args.PrevLogTerm = rf.log[nextIndex-2].Term
 			args.PrevLogIndex = rf.log[nextIndex-2].Index
 		}
-		for j := rf.matchIndex[i]; j < rf.nextIndex[i]; j++ {
-			fmt.Println(rf.me, j, rf.matchIndex[i], rf.nextIndex[i], len(rf.log), rf.nextIndex, rf.matchIndex)
+		//从要复制的地方开始
+		for j := rf.nextIndex[i] - 1; j < len(rf.log); j++ {
+			//fmt.Println(rf.me, j, rf.matchIndex[i], rf.nextIndex[i], len(rf.log), rf.nextIndex, rf.matchIndex)
 			args.Entries = append(args.Entries, rf.log[j])
 		}
 	}
@@ -494,14 +529,13 @@ func (rf *Raft) logReplication(i int) {
 		args := rf.newAppendEntryArgs(i, Replicate)
 		reply := &AppendEntryReply{}
 		//如果是Leader则发起复制
-
 		//fmt.Println(ok, "baba")
 		if ok := rf.sendAppendEntry(i, args, reply); !ok {
 			//如果发送失败,如follower宕机,则不发日志复制了，等心跳有反应后再发日志
 			return
 		}
-		if !reply.Success {
-			//如果匹配失败,并且nextIndex > 1,修改nextIndex,继续发送
+		if !reply.Success && reply.Term == rf.currentTerm {
+			//如果因为日志不一致导致的匹配失败(任期相同),修改nextIndex,继续
 			rf.mu.Lock()
 			if rf.nextIndex[i] > 1 {
 				rf.nextIndex[i]--
@@ -511,29 +545,30 @@ func (rf *Raft) logReplication(i int) {
 		} else {
 			//接收本次的日志,leader本地提交,matchIndex改变,nextIndex改变
 			rf.mu.Lock()
-			rf.nextIndex[i]++
+			rf.nextIndex[i] = reply.MatchIndex + 1
 			//fmt.Println(reply.MatchIndex)
 			rf.matchIndex[i] = reply.MatchIndex
-			fmt.Println(reply.MatchIndex, rf.matchIndex[i], "ds", rf.nextIndex[i])
+			//fmt.Println(reply.MatchIndex, rf.matchIndex[i], "ds", rf.nextIndex[i])
 			//统计这个d
-			cnt := 1
-			for j := 0; j < len(rf.peers); j++ {
-				if rf.me == j {
-					continue
+			n := reply.MatchIndex
+			if rf.commitIndex < n {
+				cnt := 1
+				for j := 0; j < len(rf.peers); j++ {
+					if rf.me == j {
+						continue
+					}
+					if rf.matchIndex[j] >= n && rf.log[n-1].Term == rf.currentTerm {
+						cnt++
+					}
 				}
-				if rf.matchIndex[j] >= reply.MatchIndex {
-					cnt++
-				}
-			}
-			//如果获得大部分follower的肯定,则更新commit
-			if cnt > len(rf.peers)/2 {
-				if rf.commitIndex < reply.MatchIndex {
+				if cnt > len(rf.peers)/2 {
+					//fmt.Println(rf.me, rf.status, rf.log, rf.currentTerm)
 					rf.applyChan <- ApplyMsg{
 						CommandValid: true,
 						CommandIndex: rf.log[rf.commitIndex].Index,
 						Command:      rf.log[rf.commitIndex].Command,
 					}
-					rf.commitIndex++
+					rf.commitIndex = n
 				}
 			}
 			//fmt.Println(rf.me, rf.log, rf.commitIndex, rf.currentTerm)
@@ -545,7 +580,6 @@ func (rf *Raft) logReplication(i int) {
 }
 
 func (rf *Raft) ticker() {
-o1:
 	for rf.killed() == false {
 
 		// Your code here (2A)
@@ -557,7 +591,7 @@ o1:
 		time.Sleep(time.Duration(ms) * time.Millisecond)
 		//如果是leader,则不进行检测
 		if _, leader := rf.GetState(); leader {
-			continue o1
+			continue
 		}
 		select {
 		case <-rf.beatCtx.Done():
@@ -567,11 +601,12 @@ o1:
 			rf.beatCtx = beatCtx
 			rf.beatCancel = beatCancel
 			rf.mu.Unlock()
-			continue o1
 		default:
 			//没有收到心跳包成为candidate开始选举为leader
 			//选举失败则立即开始选举
+			//fmt.Println(rf.me, rf.currentTerm)
 			for rf.killed() == false {
+
 				rf.changeStatus(rf.currentTerm+1, rf.me, true, Candidates)
 				for i := 0; i < len(rf.peers); i++ {
 					// 对其他节点发起投票请求
@@ -580,21 +615,21 @@ o1:
 					}
 					go func(server int) {
 						//开启协程,防止单个节点失联导致程序阻塞
+						rf.mu.Lock()
 						lastLogTerm := 0
 						logLen := len(rf.log)
-						rf.mu.Lock()
-						currentTerm := rf.currentTerm
 						if logLen > 0 {
 							lastLogTerm = rf.log[logLen-1].Term
 						}
 						reqArgs := &RequestVoteArgs{
-							Term:         currentTerm,
+							Term:         rf.currentTerm,
 							CandidateId:  rf.me,
 							LastLogIndex: len(rf.log),
 							LastLogTerm:  lastLogTerm,
 						}
 						rf.mu.Unlock()
 						replyArgs := &RequestVoteReply{}
+						fmt.Println(reqArgs, rf.me)
 						if ok := rf.sendRequestVote(server, reqArgs, replyArgs); ok {
 							//接受投票且任期相同则票数+1
 							if replyArgs.VoteGranted {
@@ -610,7 +645,7 @@ o1:
 								}
 								////对其他节点发起自己的日志复制,可能会发起多次复制
 								//rf.logReplication()
-							} else if replyArgs.Term > currentTerm {
+							} else if replyArgs.Term > rf.currentTerm {
 								//如果follower任期大于candidates,则candidates变为follower并且退出选举
 								if _, leader := rf.GetState(); leader {
 									rf.changeStatus(replyArgs.Term, -1, false, Follower)
@@ -620,12 +655,9 @@ o1:
 						}
 					}(i)
 				}
-				//休眠一段时间,等待所有的任务派发完毕,太短则任务还没派发完毕就重新选举;太长则会超时
-				//不同的机器性能不一样,如果并发跑脚本可能需要修改睡眠时间
-				time.Sleep(time.Duration(20) * time.Millisecond)
+				time.Sleep(50 * time.Millisecond)
 				if _, leader := rf.GetState(); leader {
-					//不发起日志复制了,如果日志落后的话,在心跳的时候会发现,心跳的时候会复制日志
-					continue o1
+					break
 				}
 			}
 		}
@@ -654,18 +686,17 @@ func (rf *Raft) beat() {
 				rf.mu.Lock()
 				logLen := len(rf.log)
 				rf.mu.Unlock()
-				if logLen == rf.matchIndex[i] {
+				if logLen < rf.nextIndex[i] {
 					//如果长度相同,则为心跳
 					req := rf.newAppendEntryArgs(i, Beat)
 					rf.sendAppendEntry(i, req, reply)
 				} else {
 					//长度不相同,则是日志复制
-					//fmt.Println(reply.MatchIndex, rf.commitIndex, i, rf.me)
+					//fmt.Println(reply.MatchIndex, rf.commitIndex, i, rf.me, rf.currentTerm)
 					rf.logReplication(i)
 				}
 			}(i)
 		}
-		time.Sleep(time.Duration(10) * time.Millisecond)
 	}
 }
 
