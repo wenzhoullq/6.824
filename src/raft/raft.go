@@ -177,7 +177,7 @@ type RequestVoteReply struct {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	// 检查任期
-	fmt.Println(args, rf.currentTerm, rf.commitIndex, "haha", rf.me, rf.status)
+	fmt.Println(args, rf.currentTerm, rf.commitIndex, "haha", rf.me)
 	rf.mu.Lock()
 	currentTerm := rf.currentTerm
 	rf.mu.Unlock()
@@ -215,6 +215,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.mu.Unlock()
 	reply.VoteGranted = true
 	fmt.Println(args, rf.currentTerm, rf.commitIndex, "gaga", rf.me)
+	rf.beatCancel()
 	//fmt.Println(rf.me, args.CandidateId, rf.currentTerm)
 }
 
